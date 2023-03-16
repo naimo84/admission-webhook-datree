@@ -42,7 +42,14 @@ spec:
         - name: scan-job
           env:
             - name: DATREE_TOKEN
-              value: {{.Values.datree.token}}
+            {{- if and .Values.datree.existingSecret (ne .Values.datree.existingSecret.name "") (ne .Values.datree.existingSecret.key "") }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.datree.existingSecret.name }}
+                  key: {{ .Values.datree.existingSecret.key }}
+            {{- else }}
+              value: "{{ .Values.datree.token }}"
+            {{- end }}
             - name: DATREE_POLICY
               value: {{.Values.datree.policy | default "Starter"}}
             - name: CLUSTER_NAME
@@ -56,7 +63,7 @@ spec:
             seccompProfile:
               type: RuntimeDefault
           image: "{{ .Values.scanJob.image.repository }}:{{ .Values.scanJob.image.tag }}"
-          imagePullPolicy: Always
+          imagePullPolicy: "{{.Values.scanJob.image.pullPolicy}}"
           resources: {{- toYaml .Values.scanJob.resources | nindent 12 }}
           volumeMounts:
             - name: webhook-config
@@ -64,7 +71,12 @@ spec:
               readOnly: true
       volumes:
         - name: webhook-config
-          configMap:
-            name: webhook-scanning-filters
-            optional: true
+          projected:
+            sources:
+            - configMap:
+                name: custom-scanning-filters
+                optional: true
+            - configMap:
+                name: webhook-scanning-filters
+                optional: true
 {{- end -}}

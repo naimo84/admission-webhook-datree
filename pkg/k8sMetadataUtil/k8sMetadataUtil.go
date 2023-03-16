@@ -7,6 +7,7 @@ import (
 
 	"github.com/datreeio/admission-webhook-datree/pkg/leaderElection"
 	"github.com/datreeio/admission-webhook-datree/pkg/logger"
+	servicestate "github.com/datreeio/admission-webhook-datree/pkg/serviceState"
 
 	cliClient "github.com/datreeio/admission-webhook-datree/pkg/clients"
 	"github.com/datreeio/admission-webhook-datree/pkg/enums"
@@ -25,6 +26,13 @@ type K8sMetadataUtil struct {
 	CreateClientSetError error
 	leaderElection       *leaderElection.LeaderElection
 	internalLogger       logger.Logger
+}
+
+type K8sMetadata struct {
+	ClusterUuid     k8sTypes.UID
+	NodesCount      int
+	NodesCountErr   error
+	ActionOnFailure enums.ActionOnFailure
 }
 
 var ClusterUuid k8sTypes.UID = ""
@@ -46,9 +54,9 @@ func NewK8sMetadataUtil(clientset *kubernetes.Clientset, createClientSetError er
 	}
 }
 
-func (k8sMetadataUtil *K8sMetadataUtil) InitK8sMetadataUtil() {
+func (k8sMetadataUtil *K8sMetadataUtil) InitK8sMetadataUtil(state *servicestate.ServiceState) {
 	validator := networkValidator.NewNetworkValidator()
-	cliClient := cliClient.NewCliServiceClient(deploymentConfig.URL, validator)
+	cliClient := cliClient.NewCliServiceClient(deploymentConfig.URL, validator, state)
 
 	var clusterUuid k8sTypes.UID
 	var actionOnFailure enums.ActionOnFailure
@@ -59,24 +67,50 @@ func (k8sMetadataUtil *K8sMetadataUtil) InitK8sMetadataUtil() {
 		actionOnFailure = enums.MonitorActionOnFailure
 	}
 
-
 	if k8sMetadataUtil.CreateClientSetError != nil {
-		k8sMetadataUtil.sendK8sMetadataIfLeader(-1, k8sMetadataUtil.CreateClientSetError, clusterUuid, cliClient, actionOnFailure)
+		k8sMetadataClientSetErr := K8sMetadata{
+			NodesCount:      -1,
+			NodesCountErr:   k8sMetadataUtil.CreateClientSetError,
+			ClusterUuid:     clusterUuid,
+			ActionOnFailure: actionOnFailure,
+		}
+		k8sMetadataUtil.sendK8sMetadata(cliClient, k8sMetadataClientSetErr)
 		return
 	}
 
 	clusterUuid, err := k8sMetadataUtil.GetClusterUuid()
 	if err != nil {
-		k8sMetadataUtil.sendK8sMetadataIfLeader(-1, err, clusterUuid, cliClient,actionOnFailure)
+		k8sMetadataGetClusterUuidErr := K8sMetadata{
+			NodesCount:      -1,
+			NodesCountErr:   err,
+			ClusterUuid:     clusterUuid,
+			ActionOnFailure: actionOnFailure,
+		}
+		k8sMetadataUtil.sendK8sMetadata(cliClient, k8sMetadataGetClusterUuidErr)
 	}
 
 	nodesCount, nodesCountErr := getNodesCount(k8sMetadataUtil.ClientSet)
-	k8sMetadataUtil.sendK8sMetadataIfLeader(nodesCount, nodesCountErr, clusterUuid, cliClient,actionOnFailure)
+	k8sMetadataOnInit := K8sMetadata{
+		NodesCount:      nodesCount,
+		NodesCountErr:   nodesCountErr,
+		ClusterUuid:     clusterUuid,
+		ActionOnFailure: actionOnFailure,
+	}
+	k8sMetadataUtil.sendK8sMetadata(cliClient, k8sMetadataOnInit)
 
 	cornJob := cron.New(cron.WithLocation(time.UTC))
 	cornJob.AddFunc("@hourly", func() {
-		nodesCount, nodesCountErr := getNodesCount(k8sMetadataUtil.ClientSet)
-		k8sMetadataUtil.sendK8sMetadataIfLeader(nodesCount, nodesCountErr, clusterUuid, cliClient, actionOnFailure)
+		if k8sMetadataUtil.leaderElection.IsLeader() {
+			nodesCount, nodesCountErr := getNodesCount(k8sMetadataUtil.ClientSet)
+			k8sMetadataHourly := K8sMetadata{
+				NodesCount:      nodesCount,
+				NodesCountErr:   nodesCountErr,
+				ClusterUuid:     clusterUuid,
+				ActionOnFailure: actionOnFailure,
+			}
+			k8sMetadataUtil.sendK8sMetadata(cliClient, k8sMetadataHourly)
+		}
+
 	})
 	cornJob.Start()
 }
@@ -141,23 +175,19 @@ func (k8sMetadataUtil *K8sMetadataUtil) GetClusterK8sVersion() (string, error) {
 	return serverInfo.GitVersion, nil
 }
 
-func (k8sMetadataUtil *K8sMetadataUtil) sendK8sMetadataIfLeader(nodesCount int, nodesCountErr error, clusterUuid k8sTypes.UID, client *cliClient.CliClient, actionOnFailure enums.ActionOnFailure) {
-	if !k8sMetadataUtil.leaderElection.IsLeader() {
-		return
-	}
-
+func (k8sMetadataUtil *K8sMetadataUtil) sendK8sMetadata(client *cliClient.CliClient, k8sMetadata K8sMetadata) {
 	token := os.Getenv(enums.Token)
 
 	var nodesCountErrString string
-	if nodesCountErr != nil {
-		nodesCountErrString = nodesCountErr.Error()
+	if k8sMetadata.NodesCountErr != nil {
+		nodesCountErrString = k8sMetadata.NodesCountErr.Error()
 	}
 
 	client.ReportK8sMetadata(&cliClient.ReportK8sMetadataRequest{
-		ClusterUuid:   clusterUuid,
-		Token:         token,
-		NodesCount:    nodesCount,
-		NodesCountErr: nodesCountErrString,
-		ActionOnFailure: actionOnFailure,
+		ClusterUuid:     k8sMetadata.ClusterUuid,
+		Token:           token,
+		NodesCount:      k8sMetadata.NodesCount,
+		NodesCountErr:   nodesCountErrString,
+		ActionOnFailure: k8sMetadata.ActionOnFailure,
 	})
 }
